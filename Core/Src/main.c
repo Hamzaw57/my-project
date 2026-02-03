@@ -6,24 +6,33 @@
   ******************************************************************************
   * @attention
   *
-  * Copyright (c) 2026 STMicroelectronics.
-  * All rights reserved.
-  *
-  * This software is licensed under terms that can be found in the LICENSE file
-  * in the root directory of this software component.
-  * If no LICENSE file comes with this software, it is provided AS-IS.
+  * Copyright (c) 2026 STMicroelectronics. All rights reserved.
+  * This software is licensed under terms in LICENSE file.
   *
   ******************************************************************************
   */
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
-#include "stm32f3xx_hal_gpio.h"
-#include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include <stdio.h>
+#include <string.h>
 
+/* NOTE: For floating-point formatting in sprintf (%.2f):
+ * Navigate to: Project Properties -> C/C++ Build -> Settings -> MCU Settings
+ * Enable: "Use float with printf from newlib-nano"
+ * Code size will increase approximately 8KB
+ * 
+ * Alternative approach: Integer-based conversion (implemented in this code)
+ * 
+ * INPUT CAPTURE NOISE REDUCTION:
+ * To minimize signal noise:
+ * 1. Configure TIM3 CH1 Input Capture Filter (CubeMX): Set to 8 or 15
+ * 2. Filters glitches lasting less than N timer cycles
+ * 3. Hardware option: Add 100nF capacitor to input pin
+ */
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -46,9 +55,41 @@ I2C_HandleTypeDef hi2c1;
 
 SPI_HandleTypeDef hspi1;
 
+TIM_HandleTypeDef htim2;
+TIM_HandleTypeDef htim3;
+
 UART_HandleTypeDef huart2;
 
+PCD_HandleTypeDef hpcd_USB_FS;
+
 /* USER CODE BEGIN PV */
+/* -------------------- TASK 3: LED Blinking at Multiple Frequencies -------------------- */
+// uint16_t led_counter_red = 0;     // LED1 (Red, PE9)
+// uint16_t led_counter_green = 0;   // LED2 (Green, PE10)
+// uint16_t led_counter_blue = 0;    // LED3 (Blue, PE11)
+
+// #define LED_RED_PERIOD 500     // 1 Hz → 500 ms toggle interval
+// #define LED_GREEN_PERIOD 200   // 2.5 Hz → 200 ms toggle interval
+// #define LED_BLUE_PERIOD 100    // 5 Hz → 100 ms toggle interval
+/* -------------------------------------------------------------------------- */
+
+/* -------------------- TASK 4: Input Signal Frequency Analyzer -------------------- */
+uint32_t previous_edge_time = 0;
+uint32_t signal_period_ticks = 0;
+float measured_freq = 0.0;
+uint8_t timer_overflow_cnt = 0;
+uint8_t freq_data_ready = 0;
+uint8_t sample_counter = 0;  // Reduces UART transmission frequency
+
+// Timer frequency calculation:
+// APB1 base clock = 24 MHz, timer clock = APB1 × 2 = 48 MHz (APB prescaler multiplier)
+// TIM3 Prescaler setting = 1 (from CubeMX), actual divider = Prescaler + 1 = 2
+// Final Timer Clock = 48 MHz / 2 = 24 MHz
+#define TIM_BASE_CLOCK 48000000  // Timer base frequency (pre-prescaler)
+#define TIM3_PSC_VALUE 1         // Prescaler configuration (from CubeMX)
+
+char serial_tx_buffer[100];
+/* -------------------------------------------------------------------------- */
 
 /* USER CODE END PV */
 
@@ -57,6 +98,9 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_I2C1_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_TIM2_Init(void);
+static void MX_USB_PCD_Init(void);
+static void MX_TIM3_Init(void);
 static void MX_USART2_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
@@ -64,380 +108,128 @@ static void MX_USART2_UART_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-/* USER CODE BEGIN 0 */
 
-// Segment pins
-#define SEG_A GPIO_PIN_1
-#define SEG_B GPIO_PIN_2
-#define SEG_C GPIO_PIN_3
-#define SEG_D GPIO_PIN_4
-#define SEG_E GPIO_PIN_5
-#define SEG_F GPIO_PIN_6
-#define SEG_G GPIO_PIN_7
+/* -------------------- TASK 1: Millisecond Delay Implementation -----------------------------
+void custom_delay_ms(uint32_t milliseconds){
+    __HAL_TIM_SET_COUNTER(&htim2, 0);
+    HAL_TIM_Base_Start(&htim2);
+    while (__HAL_TIM_GET_COUNTER(&htim2) < milliseconds);
+    HAL_TIM_Base_Stop(&htim2);
+}
+---------------------------------------------------------------------------*/
 
-// Common anode logic
-// task1
-// #define SEG_ON  GPIO_PIN_RESET
-// #define SEG_OFF GPIO_PIN_SET
-// void display_number(uint8_t num)
+/* -------------------- TASK 2: LED Toggle Using Timer Interrupt---------------------
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if(htim->Instance == TIM2)
+    {
+        HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_9); // Toggle red LED
+    }
+}
+---------------------------------------------------------------------------*/
+
+/* -------------------- TASK 3: Multi-Rate LED Controller------------- */
+// void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 // {
-//   // Turn all segments OFF first
-//   HAL_GPIO_WritePin(GPIOD,
-//     SEG_A|SEG_B|SEG_C|SEG_D|SEG_E|SEG_F|SEG_G,
-//     SEG_OFF);
-
-//   switch (num)
-//   {
-//     case 0: // a b c d e f
-//       HAL_GPIO_WritePin(GPIOD,
-//         SEG_A|SEG_B|SEG_C|SEG_D|SEG_E|SEG_F,
-//         SEG_ON);
-//       break;
-
-//     case 1: // b c
-//       HAL_GPIO_WritePin(GPIOD,
-//         SEG_B|SEG_C,
-//         SEG_ON);
-//       break;
-
-//     case 2: // a b d e g
-//       HAL_GPIO_WritePin(GPIOD,
-//         SEG_A|SEG_B|SEG_D|SEG_E|SEG_G,
-//         SEG_ON);
-//       break;
-
-//     case 3: // a b c d g
-//       HAL_GPIO_WritePin(GPIOD,
-//         SEG_A|SEG_B|SEG_C|SEG_D|SEG_G,
-//         SEG_ON);
-//       break;
-
-//     case 4: // b c f g
-//       HAL_GPIO_WritePin(GPIOD,
-//         SEG_B|SEG_C|SEG_F|SEG_G,
-//         SEG_ON);
-//       break;
-
-//     case 5: // a c d f g
-//       HAL_GPIO_WritePin(GPIOD,
-//         SEG_A|SEG_C|SEG_D|SEG_F|SEG_G,
-//         SEG_ON);
-//       break;
-
-//     case 6: // a c d e f g
-//       HAL_GPIO_WritePin(GPIOD,
-//         SEG_A|SEG_C|SEG_D|SEG_E|SEG_F|SEG_G,
-//         SEG_ON);
-//       break;
-
-//     case 7: // a b c
-//       HAL_GPIO_WritePin(GPIOD,
-//         SEG_A|SEG_B|SEG_C,
-//         SEG_ON);
-//       break;
-
-//     case 8: // a b c d e f g
-//       HAL_GPIO_WritePin(GPIOD,
-//         SEG_A|SEG_B|SEG_C|SEG_D|SEG_E|SEG_F|SEG_G,
-//         SEG_ON);
-//       break;
-
-//     case 9: // a b c d f g
-//       HAL_GPIO_WritePin(GPIOD,
-//         SEG_A|SEG_B|SEG_C|SEG_D|SEG_F|SEG_G,
-//         SEG_ON);
-//       break;
-
-//     case 10: // A → a b c e f g
-//       HAL_GPIO_WritePin(GPIOD,
-//         SEG_A|SEG_B|SEG_C|SEG_E|SEG_F|SEG_G,
-//         SEG_ON);
-//       break;
-
-//     case 11: // b → c d e f g
-//       HAL_GPIO_WritePin(GPIOD,
-//         SEG_C|SEG_D|SEG_E|SEG_F|SEG_G,
-//         SEG_ON);
-//       break;
-
-//     case 12: // C → a d e f
-//       HAL_GPIO_WritePin(GPIOD,
-//         SEG_A|SEG_D|SEG_E|SEG_F,
-//         SEG_ON);
-//       break;
-
-//     case 13: // d → b c d e g
-//       HAL_GPIO_WritePin(GPIOD,
-//         SEG_B|SEG_C|SEG_D|SEG_E|SEG_G,
-//         SEG_ON);
-//       break;
-
-//     case 14: // E → a d e f g
-//       HAL_GPIO_WritePin(GPIOD,
-//         SEG_A|SEG_D|SEG_E|SEG_F|SEG_G,
-//         SEG_ON);
-//       break;
-
-//     case 15: // F → a e f g
-//       HAL_GPIO_WritePin(GPIOD,
-//         SEG_A|SEG_E|SEG_F|SEG_G,
-//         SEG_ON);
-//       break;
-//   }
-// }
-
-/* USER CODE END 0 */
-//task 2
-I2C_HandleTypeDef hi2c1;
-
-SPI_HandleTypeDef hspi1;
-
-UART_HandleTypeDef huart2;
-
-/* USER CODE BEGIN PV */
-// Common Anode logic: LOW = ON
-#define SEG_ON  GPIO_PIN_RESET
-#define SEG_OFF GPIO_PIN_SET
-
-// Student ID
-uint8_t studentID[5] = {1,0,6,6,5};
-uint8_t currentDigit = 0;
-
-// Last button state for edge detection
-uint8_t lastButtonState = 0;
-/* USER CODE END PV */
-
-/* Private function prototypes -----------------------------------------------*/
-
-uint8_t lastButtonStateInc = GPIO_PIN_RESET;
-uint8_t lastButtonStateDec = GPIO_PIN_RESET;
-
-void SystemClock_Config(void);
-static void MX_GPIO_Init(void);
-static void MX_I2C1_Init(void);
-static void MX_SPI1_Init(void);
-static void MX_USART2_UART_Init(void);
-/* USER CODE BEGIN PFP */
-void display_number(uint8_t num);
-uint8_t button_pressed(void);
-/* USER CODE END PFP */
-
-/* Private user code ---------------------------------------------------------*/
-/* USER CODE BEGIN 0 */
-
-// void display_number(uint8_t num)
-// {
-//     // Turn off all segments first
-//     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|
-//                              GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|
-//                              GPIO_PIN_7, SEG_OFF);
-
-//     switch(num)
+//     if(htim->Instance == TIM2)
 //     {
-//         case 0: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|
-//                                         GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_7, SEG_ON); break;
-//         case 1: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_2|GPIO_PIN_3, SEG_ON); break;
-//         case 2: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_4|
-//                                         GPIO_PIN_5|GPIO_PIN_6, SEG_ON); break;
-//         case 3: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|
-//                                         GPIO_PIN_4|GPIO_PIN_6, SEG_ON); break;
-//         case 4: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_2|GPIO_PIN_3|
-//                                         GPIO_PIN_6|GPIO_PIN_7, SEG_ON); break;
-//         case 5: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_3|GPIO_PIN_4|
-//                                         GPIO_PIN_6|GPIO_PIN_7, SEG_ON); break;
-//         case 6: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_3|GPIO_PIN_4|
-//                                         GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7, SEG_ON); break;
-//         case 7: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3, SEG_ON); break;
-//         case 8: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|
-//                                         GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|
-//                                         GPIO_PIN_7, SEG_ON); break;
-//         case 9: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|
-//                                         GPIO_PIN_4|GPIO_PIN_6|GPIO_PIN_7, SEG_ON); break;
-//     }
-// }
+//         // Update all LED counters
+//         led_counter_red++;
+//         led_counter_green++;
+//         led_counter_blue++;
 
-// uint8_t button_pressed(void)
-// {
-//     uint8_t currentState = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
-
-//     if(currentState == GPIO_PIN_SET && lastButtonState == GPIO_PIN_RESET)
-//     {
-//         HAL_Delay(50); // debounce
-//         if(HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET)
+//         // Control LED1: PE9 (Red LED)
+//         if(led_counter_red >= LED_RED_PERIOD)
 //         {
-//             lastButtonState = GPIO_PIN_SET;
-//             return 1;
+//             HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_9);
+//             led_counter_red = 0;
+//         }
+
+//         // Control LED2: PE10 (Green LED)
+//         if(led_counter_green >= LED_GREEN_PERIOD)
+//         {
+//             HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_10);
+//             led_counter_green = 0;
+//         }
+
+//         // Control LED3: PE11 (Blue LED)
+//         if(led_counter_blue >= LED_BLUE_PERIOD)
+//         {
+//             HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_11);
+//             led_counter_blue = 0;
 //         }
 //     }
-//     else if(currentState == GPIO_PIN_RESET)
-//     {
-//         lastButtonState = GPIO_PIN_RESET;
-//     }
-//     return 0;
 // }
-//task3
-// uint8_t lastButtonStateInc = 0;
-// uint8_t lastButtonStateDec = 0;
-// void display_number(uint8_t num)
-// {
-//     // Turn off all segments first
-//     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|
-//                              GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|
-//                              GPIO_PIN_7, SEG_OFF);
+/* -------------------------------------------------------------------------- */
 
-//     switch(num)
-//     {
-//         case 0: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|
-//                                         GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_7, SEG_ON); break;
-//         case 1: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_2|GPIO_PIN_3, SEG_ON); break;
-//         case 2: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_4|
-//                                         GPIO_PIN_5|GPIO_PIN_6, SEG_ON); break;
-//         case 3: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|
-//                                         GPIO_PIN_4|GPIO_PIN_6, SEG_ON); break;
-//         case 4: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_2|GPIO_PIN_3|
-//                                         GPIO_PIN_6|GPIO_PIN_7, SEG_ON); break;
-//         case 5: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_3|GPIO_PIN_4|
-//                                         GPIO_PIN_6|GPIO_PIN_7, SEG_ON); break;
-//         case 6: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_3|GPIO_PIN_4|
-//                                         GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7, SEG_ON); break;
-//         case 7: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3, SEG_ON); break;
-//         case 8: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|
-//                                         GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|
-//                                         GPIO_PIN_7, SEG_ON); break;
-//         case 9: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|
-//                                         GPIO_PIN_4|GPIO_PIN_6|GPIO_PIN_7, SEG_ON); break;
-//     }
-// }
 
-// // Check increment button (PA0)
-// uint8_t button_inc_pressed(void)
-// {
-//     uint8_t currentState = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
-
-//     if(currentState == GPIO_PIN_SET && lastButtonStateInc == GPIO_PIN_RESET)
-//     {
-//         HAL_Delay(50); // debounce
-//         if(HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET)
-//         {
-//             lastButtonStateInc = GPIO_PIN_SET;
-//             return 1;
-//         }
-//     }
-//     else if(currentState == GPIO_PIN_RESET)
-//     {
-//         lastButtonStateInc = GPIO_PIN_RESET;
-//     }
-//     return 0;
-// }
-
-// Check decrement button (PA1)
-// uint8_t button_dec_pressed(void)
-// {
-//     uint8_t currentState = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_4);
-
-//     if(currentState == GPIO_PIN_SET && lastButtonStateDec == GPIO_PIN_RESET)
-//     {
-//         HAL_Delay(50); // debounce
-//         if(HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_1) == GPIO_PIN_SET)
-//         {
-//             lastButtonStateDec = GPIO_PIN_SET;
-//             return 1;
-//         }
-//     }
-//     else if(currentState == GPIO_PIN_RESET)
-//     {
-//         lastButtonStateDec = GPIO_PIN_RESET;
-//     }
-//     return 0;
-// }
-
-/* USER CODE END 0 */
+/* -------------------------------TASK 4: Signal Frequency Measurement Module--------------------------------------- */
 
 /**
-  * @brief  The application entry point.
-  * @retval int
+  * @brief  Callback handler for input capture events
+  * @param  htim: Pointer to timer handle structure
+  * @retval None
   */
-
-
-/* USER CODE BEGIN 4 */
-/* USER CODE BEGIN 0 */
-
-void display_number(uint8_t num)
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|
-                             GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|
-                             GPIO_PIN_7, SEG_OFF);
-
-    switch(num)
+    if(htim->Instance == TIM3)
     {
-        case 0: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|
-                                        GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6, SEG_ON); break;
-        case 1: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_2|GPIO_PIN_3, SEG_ON); break;
-        case 2: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_4|
-                                        GPIO_PIN_5|GPIO_PIN_7, SEG_ON); break;
-        case 3: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|
-                                        GPIO_PIN_4|GPIO_PIN_7, SEG_ON); break;
-        case 4: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_2|GPIO_PIN_3|
-                                        GPIO_PIN_6|GPIO_PIN_7, SEG_ON); break;
-        case 5: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_3|GPIO_PIN_4|
-                                        GPIO_PIN_6|GPIO_PIN_7, SEG_ON); break;
-        case 6: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_3|GPIO_PIN_4|
-                                        GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7, SEG_ON); break;
-        case 7: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3, SEG_ON); break;
-        case 8: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|
-                                        GPIO_PIN_4|GPIO_PIN_5|GPIO_PIN_6|
-                                        GPIO_PIN_7, SEG_ON); break;
-        case 9: HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|
-                                        GPIO_PIN_4|GPIO_PIN_6|GPIO_PIN_7, SEG_ON); break;
-    }
-}
-
-uint8_t button_inc_pressed(void)
-{
-    uint8_t currentState = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0);
-
-    if (currentState == GPIO_PIN_SET && lastButtonStateInc == GPIO_PIN_RESET)
-    {
-        HAL_Delay(50);
-        if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_0) == GPIO_PIN_SET)
+        if(htim->Channel == HAL_TIM_ACTIVE_CHANNEL_1)
         {
-            lastButtonStateInc = GPIO_PIN_SET;
-            return 1;
+            // Retrieve current capture timestamp
+            uint32_t current_edge_time = HAL_TIM_ReadCapturedValue(htim, TIM_CHANNEL_1);
+            
+            // Compute period accounting for counter overflow
+            if(current_edge_time >= previous_edge_time)
+            {
+                signal_period_ticks = current_edge_time - previous_edge_time;
+            }
+            else
+            {
+                // Counter wrapped around
+                signal_period_ticks = (0xFFFF - previous_edge_time) + current_edge_time + 1;
+            }
+            
+            // Store timestamp for next calculation
+            previous_edge_time = current_edge_time;
+            
+            // Compute frequency from period
+            // Formula: Frequency = Timer_Clock / [(Prescaler + 1) × Period]
+            if(signal_period_ticks > 0)
+            {
+                measured_freq = (float)TIM_BASE_CLOCK / ((float)(TIM3_PSC_VALUE + 1) * (float)signal_period_ticks);
+                freq_data_ready = 1;
+            }
+            
+            // Clear overflow counter
+            timer_overflow_cnt = 0;
         }
     }
-    else if (currentState == GPIO_PIN_RESET)
-    {
-        lastButtonStateInc = GPIO_PIN_RESET;
-    }
-    return 0;
 }
 
-uint8_t button_dec_pressed(void)
+/**
+  * @brief  Callback for timer overflow - detects absent or very low frequency signals
+  * @param  htim: Pointer to timer handle structure
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
-    uint8_t currentState = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_4);
-
-    if (currentState == GPIO_PIN_SET && lastButtonStateDec == GPIO_PIN_RESET)
+    if(htim->Instance == TIM3)
     {
-        HAL_Delay(50);
-        if (HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_4) == GPIO_PIN_SET)
+        timer_overflow_cnt++;
+        
+        // Signal absent or frequency too low if excessive overflows occur
+        if(timer_overflow_cnt > 10)
         {
-            lastButtonStateDec = GPIO_PIN_SET;
-            return 1;
+            measured_freq = 0.0;
+            signal_period_ticks = 0;
+            freq_data_ready = 0;
         }
     }
-    else if (currentState == GPIO_PIN_RESET)
-    {
-        lastButtonStateDec = GPIO_PIN_RESET;
-    }
-    return 0;
 }
 
-/* USER CODE END 0 */
+/* -------------------------------------------------------------------------- */
 
-/* USER CODE END 4 */
-
-/* System Clock, GPIO, I2C, SPI, UART init functions remain same as generated by CubeMX */
-/* USER CODE BEGIN Error_Handler_Debug */
 /* USER CODE END 0 */
 
 /**
@@ -447,35 +239,6 @@ uint8_t button_dec_pressed(void)
 int main(void)
 {
 
-  /* MCU Configuration--------------------------------------------------------*/
-  HAL_Init();
-  SystemClock_Config();
-  MX_GPIO_Init();
-  MX_I2C1_Init();
-  MX_SPI1_Init();
-  MX_USART2_UART_Init();
-  MX_USB_DEVICE_Init();
-
-  /* Display initial digit */
-  display_number(currentDigit);
-
-  /* Infinite loop */
-  while (1)
-  {
-      if(button_inc_pressed())
-      {
-          currentDigit++;
-          // if(currentDigit >= 5) currentDigit = 0; // wrap around
-          display_number(currentDigit);
-      }
-
-      if(button_dec_pressed())
-      {
-          if(currentDigit == 0) currentDigit = 4; // wrap around backwards
-          else currentDigit--;
-          display_number(currentDigit);
-      }
-  }
   /* USER CODE BEGIN 1 */
 
   /* USER CODE END 1 */
@@ -497,15 +260,26 @@ int main(void)
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
-  HAL_Init();
-  SystemClock_Config();
-  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_I2C1_Init();
   MX_SPI1_Init();
+  MX_TIM2_Init();
+  MX_USB_PCD_Init();
+  MX_TIM3_Init();
   MX_USART2_UART_Init();
-  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 2 */
+
+  /* -------------------- TASK 4: Initialize Frequency Measurement System -------------------- */
+  // Activate TIM3 input capture with interrupts enabled
+  HAL_TIM_IC_Start_IT(&htim3, TIM_CHANNEL_1);
+  
+  // Enable timer base interrupt for overflow monitoring
+  HAL_TIM_Base_Start_IT(&htim3);
+  
+  // Transmit startup message over UART
+  sprintf(serial_tx_buffer, "Frequency Measurement Started\r\n");
+  HAL_UART_Transmit(&huart2, (uint8_t*)serial_tx_buffer, strlen(serial_tx_buffer), HAL_MAX_DELAY);
+  /* -------------------------------------------------------------------------- */
 
   /* USER CODE END 2 */
 
@@ -514,21 +288,51 @@ int main(void)
   while (1)
   {
     /* USER CODE END WHILE */
-//   for (uint8_t i = 0; i < 16; i++)
-// {
-//   display_number(i);   // 0 → F
-//   HAL_Delay(2000);     // 2 seconds
-// }
-    /* USER CODE BEGIN 3 */
-   if (button_inc_pressed())   // USER button
-{
-    uint8_t randomNum = (rand() % 6) + 1;  // 1 to 6
-    display_number(randomNum);
-}
 
+    /* USER CODE BEGIN 3 */
+    
+    /* -------------------- TASK 4: Frequency Data Reporting Module -------------------- */
+    if(freq_data_ready)
+    {
+        sample_counter++;
+        
+        // Reduce transmission rate at high frequencies to prevent blocking
+        // Configurable interval: 1 = every measurement, 10 = every 10th measurement
+        uint8_t tx_rate_divider = 1;
+        
+        // Adaptive rate control based on frequency range
+        if(measured_freq > 100000) {
+            tx_rate_divider = 100;  // Above 100kHz: transmit every 100th sample
+        } else if(measured_freq > 10000) {
+            tx_rate_divider = 10;   // Above 10kHz: transmit every 10th sample
+        }
+        
+        if(sample_counter >= tx_rate_divider)
+        {
+            sample_counter = 0;
+            
+            // Split frequency into integer and fractional components
+            uint32_t freq_whole = (uint32_t)measured_freq;
+            uint32_t freq_fraction = (uint32_t)((measured_freq - freq_whole) * 100);
+            
+            // Transmit measurement data over UART
+            sprintf(serial_tx_buffer, "Period: %lu ticks, Frequency: %lu.%02lu Hz\r\n", 
+                    signal_period_ticks, freq_whole, freq_fraction);
+            HAL_UART_Transmit(&huart2, (uint8_t*)serial_tx_buffer, strlen(serial_tx_buffer), HAL_MAX_DELAY);
+            
+            // Visual indication via LED toggle
+            HAL_GPIO_TogglePin(GPIOE, GPIO_PIN_9);  // Toggle red LED
+        }
+        
+        // Clear ready flag after processing
+        freq_data_ready = 0;
+    }
+    
+    // Continuous monitoring - no delay required
+    /* -------------------------------------------------------------------------- */
   }
   /* USER CODE END 3 */
-
+}
 
 /**
   * @brief System Clock Configuration
@@ -669,6 +473,99 @@ static void MX_SPI1_Init(void)
 }
 
 /**
+  * @brief TIM2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM2_Init(void)
+{
+
+  /* USER CODE BEGIN TIM2_Init 0 */
+
+  /* USER CODE END TIM2_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM2_Init 1 */
+
+  /* USER CODE END TIM2_Init 1 */
+  htim2.Instance = TIM2;
+  htim2.Init.Prescaler = 47999;
+  htim2.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim2.Init.Period = 0;
+  htim2.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim2.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim2, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim2, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM2_Init 2 */
+
+  /* USER CODE END TIM2_Init 2 */
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_IC_InitTypeDef sConfigIC = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 1;  // Prescaler set to 1 for wider measurement range
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 0xFFFF;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_IC_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigIC.ICPolarity = TIM_INPUTCHANNELPOLARITY_RISING;
+  sConfigIC.ICSelection = TIM_ICSELECTION_DIRECTTI;
+  sConfigIC.ICPrescaler = TIM_ICPSC_DIV1;
+  sConfigIC.ICFilter = 0;
+  if (HAL_TIM_IC_ConfigChannel(&htim3, &sConfigIC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
+
+}
+
+/**
   * @brief USART2 Initialization Function
   * @param None
   * @retval None
@@ -704,6 +601,37 @@ static void MX_USART2_UART_Init(void)
 }
 
 /**
+  * @brief USB Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USB_PCD_Init(void)
+{
+
+  /* USER CODE BEGIN USB_Init 0 */
+
+  /* USER CODE END USB_Init 0 */
+
+  /* USER CODE BEGIN USB_Init 1 */
+
+  /* USER CODE END USB_Init 1 */
+  hpcd_USB_FS.Instance = USB;
+  hpcd_USB_FS.Init.dev_endpoints = 8;
+  hpcd_USB_FS.Init.speed = PCD_SPEED_FULL;
+  hpcd_USB_FS.Init.phy_itface = PCD_PHY_EMBEDDED;
+  hpcd_USB_FS.Init.low_power_enable = DISABLE;
+  hpcd_USB_FS.Init.battery_charging_enable = DISABLE;
+  if (HAL_PCD_Init(&hpcd_USB_FS) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USB_Init 2 */
+
+  /* USER CODE END USB_Init 2 */
+
+}
+
+/**
   * @brief GPIO Initialization Function
   * @param None
   * @retval None
@@ -720,17 +648,12 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOF_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
-  __HAL_RCC_GPIOD_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(GPIOE, CS_I2C_SPI_Pin|LD4_Pin|LD3_Pin|LD5_Pin
                           |LD7_Pin|LD9_Pin|LD10_Pin|LD8_Pin
                           |LD6_Pin, GPIO_PIN_RESET);
-
-  /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOD, GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4
-                          |GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7, GPIO_PIN_RESET);
 
   /*Configure GPIO pins : DRDY_Pin MEMS_INT3_Pin MEMS_INT4_Pin MEMS_INT1_Pin
                            MEMS_INT2_Pin */
@@ -754,23 +677,8 @@ static void MX_GPIO_Init(void)
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
-
-  /*Configure GPIO pin : PD0 */
-  GPIO_InitStruct.Pin = GPIO_PIN_0;
-  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLDOWN;
-  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-
-  /*Configure GPIO pins : PD1 PD2 PD3 PD4
-                           PD5 PD6 PD7 */
-  GPIO_InitStruct.Pin = GPIO_PIN_1|GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4
-                          |GPIO_PIN_5|GPIO_PIN_6|GPIO_PIN_7;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+  HAL_GPIO_Init(B1_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN MX_GPIO_Init_2 */
 
